@@ -40,6 +40,7 @@ defmodule AshAuthentication.Oauth2Server do
   | `:enforce_scopes?` | `true` | When `true`, requested scopes at `/authorize` MUST be a subset of `:scopes`. Set to `false` only if you have a dynamic / runtime-generated scope catalogue and intend to validate downstream. |
   | `:access_token_lifetime` | `{1, :hour}` | `{integer, unit}` where unit is `:second`, `:minute`, `:hour`, or `:day` |
   | `:refresh_token_lifetime` | `{30, :days}` | |
+  | `:refresh_token_grace_seconds` | `0` | Overlap window (whole seconds) after a refresh token is rotated during which the *parent* token may still be presented. Within the window a re-presented parent yields a fresh access token plus the **same** refresh token echoed back — the successor is left intact and no new rotation happens. Covers lost-response retries and concurrent double-refreshes without revoking the chain. `0` (default) keeps strict OAuth 2.1 §4.3.1 reuse detection: any reuse of a rotated token revokes the whole chain. Keep this small (single-digit seconds) so genuine stolen-token replay is still caught once the window closes. |
   | `:authorization_code_lifetime` | `{10, :minutes}` | |
   | `:clock_skew_seconds` | `30` | Tolerance applied to `exp` and `nbf` JWT claim checks. Allows for small clock differences between the AS and resource server. RFC 7519 §4.1.4 — "MAY provide for some small leeway, usually no more than a few minutes." |
   | `:dcr_enabled?` | `false` | Enable dynamic client registration (RFC 7591) at `POST /oauth/register`. Off by default — the safer posture for first-party-only apps. Turn on if you're hosting clients that self-register (MCP, ChatGPT Apps SDK, Claude.ai connectors). When off, the route 404s and the metadata document omits `registration_endpoint`. |
@@ -143,6 +144,7 @@ defmodule AshAuthentication.Oauth2Server do
       enforce_scopes?: true,
       access_token_lifetime: {1, :hour},
       refresh_token_lifetime: {30, :days},
+      refresh_token_grace_seconds: 0,
       authorization_code_lifetime: {10, :minutes},
       clock_skew_seconds: 30,
       dcr_enabled?: false,
@@ -191,6 +193,9 @@ defmodule AshAuthentication.Oauth2Server do
 
       def refresh_token_lifetime,
         do: Oauth2Server.__lifetime_seconds__(@oauth2_server_opts[:refresh_token_lifetime])
+
+      def refresh_token_grace_seconds,
+        do: Oauth2Server.__grace_seconds__(@oauth2_server_opts[:refresh_token_grace_seconds])
 
       def authorization_code_lifetime,
         do: Oauth2Server.__lifetime_seconds__(@oauth2_server_opts[:authorization_code_lifetime])
@@ -301,6 +306,15 @@ defmodule AshAuthentication.Oauth2Server do
     do: raise(ArgumentError, "invalid lifetime: #{inspect(other)}")
 
   @doc false
+  # The rotation grace window is a plain non-negative second count — `0`
+  # (the default, meaning "no overlap") is valid here, unlike the lifetime
+  # options which must be strictly positive.
+  def __grace_seconds__(seconds) when is_integer(seconds) and seconds >= 0, do: seconds
+
+  def __grace_seconds__(other),
+    do: raise(ArgumentError, "invalid refresh_token_grace_seconds: #{inspect(other)}")
+
+  @doc false
   def __resolve_secret__!(value, module, path, context \\ %{}) do
     case resolve_secret(value, module, path, context) do
       {:ok, resolved} ->
@@ -407,4 +421,33 @@ defmodule AshAuthentication.Oauth2Server do
   defp normalize_port("http", 80), do: nil
   defp normalize_port("https", 443), do: nil
   defp normalize_port(_, port), do: port
+
+  @loopback_hosts ~w(localhost 127.0.0.1 ::1)
+
+  @doc false
+  # RFC 8252 §7.3 — a native app that uses a loopback redirect picks the
+  # port at request time, so it may register `http://127.0.0.1:X/cb` and
+  # then authorize from `http://127.0.0.1:Y/cb`. For `http` loopback hosts
+  # (`localhost`, `127.0.0.1`, `::1`) we match on scheme + host + path and
+  # ignore the port. The host stays exact — `localhost` is NOT equivalent
+  # to `127.0.0.1` — and everything non-loopback falls back to the caller's
+  # exact/normalized comparison (this returns `false` for it).
+  def __loopback_redirect_match__?(candidate, registered)
+      when is_binary(candidate) and is_binary(registered) do
+    a = URI.parse(candidate)
+    b = URI.parse(registered)
+
+    loopback_http?(a) and loopback_http?(b) and
+      String.downcase(a.host) == String.downcase(b.host) and
+      normalize_path(a.path) == normalize_path(b.path)
+  end
+
+  def __loopback_redirect_match__?(_, _), do: false
+
+  defp loopback_http?(%URI{scheme: scheme, host: host})
+       when is_binary(scheme) and is_binary(host) do
+    String.downcase(scheme) == "http" and String.downcase(host) in @loopback_hosts
+  end
+
+  defp loopback_http?(_), do: false
 end

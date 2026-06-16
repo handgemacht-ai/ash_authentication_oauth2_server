@@ -209,12 +209,20 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   defp load_client(_server, _params, _opts),
     do: {:error, "invalid_request", "client_id required"}
 
-  # RFC 9700 §4.1 — exact byte-equal match. No normalization, no
-  # default-port elision, no trailing-slash equivalence. The client MUST
-  # use the same redirect URI string it registered with.
+  # RFC 9700 §4.1 — exact byte-equal match for non-loopback URIs. No
+  # normalization, no default-port elision, no trailing-slash equivalence:
+  # the client MUST use the same redirect URI string it registered with.
+  #
+  # The one exception is RFC 8252 §7.3 loopback redirects: a native app
+  # picks its callback port at request time, so a client that registered
+  # `http://127.0.0.1:X/cb` may legitimately authorize from
+  # `http://127.0.0.1:Y/cb`. For those we match scheme/host/path and ignore
+  # the port (host stays exact).
   defp check_redirect_uri(%{"redirect_uri" => uri}, %{redirect_uris: uris})
        when is_binary(uri) and is_list(uris) do
-    if uri in uris, do: :ok, else: {:error, :bad_redirect_uri}
+    if uri in uris or Enum.any?(uris, &Oauth2Server.__loopback_redirect_match__?(uri, &1)),
+      do: :ok,
+      else: {:error, :bad_redirect_uri}
   end
 
   defp check_redirect_uri(_, _), do: {:error, :bad_redirect_uri}

@@ -198,6 +198,13 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
       :no_match ->
         case disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
+          {:reuse_within_grace, parent_row} ->
+            # The parent was rotated within the grace window — treat this
+            # as a benign retry/double-refresh: hand back a fresh access
+            # token and echo the presented refresh token, leaving the
+            # existing successor untouched and the chain un-revoked.
+            mint_access_for_grace(server, parent_row, raw, opts)
+
           :reuse ->
             revoke_chain_by_hash(server, hash, opts)
             {:error, :reuse}
@@ -304,6 +311,36 @@ defmodule AshAuthentication.Oauth2Server.Token do
     end
   end
 
+  # Within the rotation grace window a client re-presents the *parent*
+  # refresh token — a lost-response retry, or one half of a concurrent
+  # double-refresh. Mint a fresh access token and echo the same refresh
+  # token back, WITHOUT rotating again or branching the chain: the
+  # successor row issued by the original rotation stays the one true
+  # successor. Echoing the presented `raw` is the only refresh value we
+  # can return — we store hashes, not raw successor tokens.
+  defp mint_access_for_grace(server, parent_row, raw, opts) do
+    tenant = Keyword.get(opts, :tenant)
+
+    with {:ok, access_token, _claims} <-
+           Jwt.mint(server,
+             sub: parent_row.user_id,
+             client_id: parent_row.client_id,
+             scope: parent_row.scope,
+             tenant: tenant
+           ) do
+      touch_client_by_id(server, parent_row.client_id, opts)
+
+      {:ok,
+       %{
+         access_token: access_token,
+         token_type: "Bearer",
+         expires_in: server.access_token_lifetime(),
+         refresh_token: raw,
+         scope: parent_row.scope
+       }}
+    end
+  end
+
   # Re-read by hash on a 0-row update to figure out *why* the filter
   # didn't match. The atom returned drives both the public error and
   # the chain-revoke decision (only `:reuse` triggers revocation).
@@ -311,21 +348,46 @@ defmodule AshAuthentication.Oauth2Server.Token do
   # but not all data layers support that
   defp disambiguate_failure(server, hash, client_id, expected_resource, resource, opts) do
     case find_refresh(server, hash, opts) do
-      {:ok, row} -> classify_row(row, client_id, expected_resource, resource)
-      {:error, _} -> :invalid_refresh
+      {:ok, row} ->
+        classify_row(
+          row,
+          client_id,
+          expected_resource,
+          resource,
+          server.refresh_token_grace_seconds()
+        )
+
+      {:error, _} ->
+        :invalid_refresh
     end
   end
 
-  defp classify_row(row, client_id, expected_resource, resource) do
+  # Returns a failure atom, or — for a parent token rotated within the
+  # grace window — `{:reuse_within_grace, row}` carrying the already-loaded
+  # row so the caller can mint without a second query. The `revoked_at`
+  # check stays ABOVE the rotation branches: a revoked chain must never be
+  # resurrected, even inside the grace window.
+  defp classify_row(row, client_id, expected_resource, resource, grace_seconds) do
     cond do
       row.client_id != client_id -> :client_mismatch
       row.resource_uri != expected_resource -> :resource_mismatch
       not requested_resource_ok?(resource, expected_resource) -> :resource_mismatch
       row.revoked_at -> :revoked
+      row.rotated_to_id && rotated_within_grace?(row, grace_seconds) -> {:reuse_within_grace, row}
       row.rotated_to_id -> :reuse
       DateTime.compare(DateTime.utc_now(), row.expires_at) == :gt -> :expired
       true -> :invalid_refresh
     end
+  end
+
+  # `grace == 0` (the default) disables the window entirely — strict
+  # reuse detection. A row that was never rotated (`rotated_at == nil`)
+  # is never "within grace".
+  defp rotated_within_grace?(_row, 0), do: false
+  defp rotated_within_grace?(%{rotated_at: nil}, _grace), do: false
+
+  defp rotated_within_grace?(%{rotated_at: rotated_at}, grace) when is_integer(grace) do
+    DateTime.diff(DateTime.utc_now(), rotated_at) <= grace
   end
 
   @doc """

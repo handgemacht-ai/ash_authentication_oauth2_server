@@ -196,7 +196,14 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.ConsentRouter do
          registered when is_list(registered) <- Map.get(client, :redirect_uris) do
       normalized = Oauth2Server.__normalize_url__(uri)
       registered_normalized = Enum.map(registered, &Oauth2Server.__normalize_url__/1)
-      if normalized in registered_normalized, do: {:ok, uri}, else: :error
+
+      # RFC 8252 §7.3 — a loopback redirect may differ from the registered
+      # URI only in its port, so fall back to the loopback-aware match
+      # before rejecting (matches `Authorize.check_redirect_uri/2`).
+      if normalized in registered_normalized or
+           Enum.any?(registered, &Oauth2Server.__loopback_redirect_match__?(uri, &1)),
+         do: {:ok, uri},
+         else: :error
     else
       _ -> :error
     end

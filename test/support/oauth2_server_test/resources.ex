@@ -169,6 +169,13 @@ defmodule Oauth2ServerTest.OAuthRefreshToken do
       require_atomic? false
       change set_attribute(:revoked_at, &DateTime.utc_now/0)
     end
+
+    # Test-only: rewind `rotated_at` to simulate a parent token whose
+    # rotation happened outside the grace window, without sleeping.
+    update :test_set_rotated_at do
+      accept [:rotated_at]
+      require_atomic? false
+    end
   end
 
   identities do
@@ -252,6 +259,28 @@ defmodule Oauth2ServerTest.Server do
     refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
     consent_resource: Oauth2ServerTest.OAuthConsent,
     scopes: ["mcp"],
+    dcr_enabled?: true
+end
+
+defmodule Oauth2ServerTest.GraceServer do
+  @moduledoc """
+  Identical to `Oauth2ServerTest.Server` but with a non-zero
+  `:refresh_token_grace_seconds`, so the rotation overlap window is
+  exercised. Shares the same ETS-backed resources as `Server`.
+  """
+
+  use AshAuthentication.Oauth2Server,
+    otp_app: :ash_authentication_oauth2_server,
+    user_resource: Oauth2ServerTest.User,
+    issuer_url: {Oauth2ServerTest.Secrets, []},
+    resource_url: {Oauth2ServerTest.Secrets, []},
+    signing_secret: {Oauth2ServerTest.Secrets, []},
+    client_resource: Oauth2ServerTest.OAuthClient,
+    authorization_code_resource: Oauth2ServerTest.OAuthAuthorizationCode,
+    refresh_token_resource: Oauth2ServerTest.OAuthRefreshToken,
+    consent_resource: Oauth2ServerTest.OAuthConsent,
+    scopes: ["mcp"],
+    refresh_token_grace_seconds: 10,
     dcr_enabled?: true
 end
 
