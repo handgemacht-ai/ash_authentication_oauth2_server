@@ -21,6 +21,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   require Ash.Query
 
   alias AshAuthentication.Oauth2Server
+  alias AshAuthentication.Oauth2Server.ScopeSet
 
   @ash_context %{private: %{ash_authentication?: true}}
 
@@ -86,7 +87,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
          {:ok, resource} <- resolve_resource(server, params, secret_context),
          {:ok, code_challenge} <- require_present(params, "code_challenge"),
          {:ok, scope} <- require_present(params, "scope"),
-         :ok <- check_scopes(server, scope),
+         :ok <- check_scopes(server, ScopeSet.from_string(scope)),
          {:ok, redirect_uri} <- require_present(params, "redirect_uri"),
          {:ok, state} <- require_present(params, "state") do
       {:ok,
@@ -121,8 +122,11 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
     |> Ash.Query.filter(user_id == ^user.id and client_id == ^client.id)
     |> Ash.read_one(ash_opts(opts))
     |> case do
-      {:ok, %{scope: stored}} -> scope_covers?(stored, requested_scope)
-      _ -> false
+      {:ok, %{scope: stored}} ->
+        ScopeSet.covers?(ScopeSet.from_string(stored), ScopeSet.from_string(requested_scope))
+
+      _ ->
+        false
     end
   end
 
@@ -223,14 +227,21 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   # must be in the server's advertised catalogue. When false, scopes are
   # passed through unchecked — for apps with a dynamic catalogue that
   # validate scopes downstream.
-  defp check_scopes(server, scope) when is_binary(scope) do
+  defp check_scopes(server, %ScopeSet{} = requested) do
     if server.enforce_scopes?() do
-      allowed = MapSet.new(server.scopes())
-      requested = scope |> String.split(" ", trim: true) |> MapSet.new()
+      allowed = ScopeSet.from_list(server.scopes())
 
-      case MapSet.difference(requested, allowed) |> MapSet.to_list() do
-        [] -> :ok
-        [unknown | _] -> {:error, "invalid_scope", "scope #{inspect(unknown)} not allowed"}
+      if ScopeSet.subset_of?(requested, allowed) do
+        :ok
+      else
+        # `inspect/1` of the name string keeps the wire-format error
+        # description byte-for-byte with the prior implementation.
+        unknown =
+          Enum.find(ScopeSet.to_list(requested), fn name ->
+            not ScopeSet.member?(allowed, name)
+          end)
+
+        {:error, "invalid_scope", "scope #{inspect(unknown)} not allowed"}
       end
     else
       :ok
@@ -259,12 +270,4 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
 
   defp secret_context(nil), do: %{}
   defp secret_context(tenant), do: %{tenant: tenant}
-
-  defp scope_covers?(stored, requested) when is_binary(stored) and is_binary(requested) do
-    stored_set = stored |> String.split(" ", trim: true) |> MapSet.new()
-    requested_set = requested |> String.split(" ", trim: true) |> MapSet.new()
-    MapSet.subset?(requested_set, stored_set)
-  end
-
-  defp scope_covers?(_, _), do: false
 end

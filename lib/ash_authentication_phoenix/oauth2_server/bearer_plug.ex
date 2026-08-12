@@ -43,12 +43,18 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
       tenant resolution, ownership checks).
     * **`conn.assigns.oauth_claims`** — the verified JWT claims map.
       Use this for "what is this bearer allowed to do" — most
-      importantly the scope claim:
+      importantly the scope claim, which the authorization server
+      carries as a space-delimited string. Parse it with
+      `AshAuthentication.Oauth2Server.ScopeSet`:
+
+          alias AshAuthentication.Oauth2Server.ScopeSet
 
           scopes =
             conn.assigns.oauth_claims["scope"]
-            |> String.split(" ", trim: true)
+            |> ScopeSet.from_string()
 
+      (`ScopeSet.member?/2`, `ScopeSet.covers?/2`, and
+      `ScopeSet.subset_of?/2` replace hand-rolled `MapSet` math.)
       Other useful claims: `client_id` (which OAuth client minted
       this), `aud` (which resource), `jti` (unique token id).
 
@@ -73,13 +79,15 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
 
         @impl true
         def call(conn, scope) do
+          alias AshAuthentication.Oauth2Server.ScopeSet
+
           scopes =
             conn.assigns
             |> Map.get(:oauth_claims, %{})
             |> Map.get("scope", "")
-            |> String.split(" ", trim: true)
+            |> ScopeSet.from_string()
 
-          if scope in scopes do
+          if ScopeSet.member?(scopes, scope) do
             conn
           else
             conn |> send_resp(403, "") |> halt()
@@ -101,10 +109,13 @@ defmodule AshAuthentication.Phoenix.Oauth2Server.BearerPlug do
   controller:
 
       plug fn conn, _ ->
+        alias AshAuthentication.Oauth2Server.ScopeSet
+
         Ash.PlugHelpers.update_context(conn, fn ctx ->
           Map.put(ctx || %{}, :oauth_scopes,
             conn.assigns.oauth_claims["scope"]
-            |> String.split(" ", trim: true))
+            |> ScopeSet.from_string()
+            |> ScopeSet.to_list())
         end)
       end
 
