@@ -28,7 +28,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   require Ash.Query
   require Logger
 
-  alias AshAuthentication.Oauth2Server.{Jwt, PKCE}
+  alias AshAuthentication.Oauth2Server.{Instant, Jwt, PKCE}
 
   @ash_context %{private: %{ash_authentication?: true}}
 
@@ -117,7 +117,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   defp check_not_consumed(_), do: {:error, :reuse}
 
   defp check_not_expired(%{expires_at: expires_at}) do
-    if DateTime.compare(DateTime.utc_now(), expires_at) == :gt,
+    if Instant.expired?(Instant.from_datetime(expires_at), 0),
       do: {:error, :expired},
       else: :ok
   end
@@ -238,7 +238,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
   end
 
   defp do_atomic_rotate(server, hash, client_id, expected_resource, new_id, opts) do
-    now = DateTime.utc_now()
+    now = Instant.to_datetime(Instant.now())
 
     bulk_opts =
       [return_records?: true, return_errors?: true]
@@ -265,7 +265,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
     tenant = Keyword.get(opts, :tenant)
 
     new_expires_at =
-      DateTime.add(DateTime.utc_now(), server.refresh_token_lifetime(), :second)
+      Instant.to_datetime(Instant.add(Instant.now(), server.refresh_token_lifetime()))
 
     with {:ok, _new_row} <-
            server.refresh_token_resource()
@@ -323,7 +323,7 @@ defmodule AshAuthentication.Oauth2Server.Token do
       not requested_resource_ok?(resource, expected_resource) -> :resource_mismatch
       row.revoked_at -> :revoked
       row.rotated_to_id -> :reuse
-      DateTime.compare(DateTime.utc_now(), row.expires_at) == :gt -> :expired
+      Instant.expired?(Instant.from_datetime(row.expires_at), 0) -> :expired
       true -> :invalid_refresh
     end
   end
@@ -431,7 +431,10 @@ defmodule AshAuthentication.Oauth2Server.Token do
 
   defp issue_refresh_token(server, client_id, code, opts) do
     {raw, hash} = generate_refresh()
-    expires_at = DateTime.add(DateTime.utc_now(), server.refresh_token_lifetime(), :second)
+
+    expires_at =
+      Instant.to_datetime(Instant.add(Instant.now(), server.refresh_token_lifetime()))
+
     id = Ash.UUIDv7.generate()
 
     server.refresh_token_resource()

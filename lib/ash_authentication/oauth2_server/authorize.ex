@@ -21,7 +21,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
   require Ash.Query
 
   alias AshAuthentication.Oauth2Server
-  alias AshAuthentication.Oauth2Server.ScopeSet
+  alias AshAuthentication.Oauth2Server.{Instant, ScopeSet}
 
   @ash_context %{private: %{ash_authentication?: true}}
 
@@ -162,7 +162,7 @@ defmodule AshAuthentication.Oauth2Server.Authorize do
         ) :: Ash.Resource.record()
   def issue_code!(server, user, validated, opts \\ []) do
     expires_at =
-      DateTime.add(DateTime.utc_now(), server.authorization_code_lifetime(), :second)
+      Instant.to_datetime(Instant.add(Instant.now(), server.authorization_code_lifetime()))
 
     server.authorization_code_resource()
     |> Ash.Changeset.for_create(:create, %{

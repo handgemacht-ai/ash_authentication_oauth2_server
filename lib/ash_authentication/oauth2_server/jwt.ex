@@ -27,6 +27,8 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
 
   @signer_alg "HS256"
 
+  alias AshAuthentication.Oauth2Server.Instant
+
   @doc """
   Mint a new access token.
 
@@ -48,7 +50,7 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
     ttl = Keyword.get(opts, :ttl, server.access_token_lifetime())
     tenant = opts[:tenant]
     secret_context = secret_context(tenant)
-    now = System.system_time(:second)
+    now = Instant.now()
 
     claims =
       %{
@@ -57,9 +59,9 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
         "aud" => server.resource_url(secret_context),
         "client_id" => to_string(client_id),
         "scope" => scope,
-        "iat" => now,
-        "nbf" => now,
-        "exp" => now + ttl,
+        "iat" => Instant.to_unix(now),
+        "nbf" => Instant.to_unix(now),
+        "exp" => Instant.to_unix(Instant.add(now, ttl)),
         "jti" => generate_jti()
       }
       |> maybe_put_tenant(tenant, server.user_resource())
@@ -134,14 +136,18 @@ defmodule AshAuthentication.Oauth2Server.Jwt do
   defp check_aud(_, _, _), do: {:error, :invalid_audience}
 
   defp check_exp(%{"exp" => exp}, skew) when is_integer(exp) do
-    if System.system_time(:second) < exp + skew, do: :ok, else: {:error, :expired}
+    # The claim is already in its unix-second wire form; compare in that
+    # space to preserve the `>=` boundary semantics (`now >= exp + skew`
+    # => expired) byte-for-byte. `now` is the named instant, projected
+    # to the wire form via `Instant.to_unix/1`.
+    if Instant.to_unix(Instant.now()) < exp + skew, do: :ok, else: {:error, :expired}
   end
 
   defp check_exp(_, _), do: {:error, :missing_exp}
 
   # `nbf` is optional per RFC 7519 §4.1.5 — only verify when present.
   defp check_nbf(%{"nbf" => nbf}, skew) when is_integer(nbf) do
-    if System.system_time(:second) + skew >= nbf, do: :ok, else: {:error, :not_yet_valid}
+    if Instant.to_unix(Instant.now()) + skew >= nbf, do: :ok, else: {:error, :not_yet_valid}
   end
 
   defp check_nbf(_, _), do: :ok
